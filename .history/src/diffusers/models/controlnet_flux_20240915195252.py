@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os  # <- 追加
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -25,6 +26,9 @@ from ..models.modeling_utils import ModelMixin
 from ..utils import USE_PEFT_BACKEND, is_torch_version, logging, scale_lora_layers, unscale_lora_layers
 from .controlnet import BaseOutput, zero_module
 from .embeddings import CombinedTimestepGuidanceTextProjEmbeddings, CombinedTimestepTextProjEmbeddings, FluxPosEmbed
+from ..pipelines.stable_diffusion.pipeline_stable_diffusion_controlnet import StableDiffusionControlNetPipeline # <- これを追加
+import os  # <- これをここに移動
+
 from .modeling_outputs import Transformer2DModelOutput
 from .transformers.transformer_flux import FluxSingleTransformerBlock, FluxTransformerBlock
 
@@ -175,46 +179,30 @@ class FluxControlNetModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
             module.gradient_checkpointing = value
 
     @classmethod
-    def from_transformer(
+    def from_pretrained(
         cls,
-        transformer,
-        num_layers: int = 4,
-        num_single_layers: int = 10,
-        attention_head_dim: int = 128,
-        num_attention_heads: int = 24,
-        load_weights_from_transformer=True,
+        pretrained_model_name_or_path: Optional[Union[str, os.PathLike]],
+        **kwargs,
     ):
-        config = transformer.config
-        config["num_layers"] = num_layers
-        config["num_single_layers"] = num_single_layers
-        config["attention_head_dim"] = attention_head_dim
-        config["num_attention_heads"] = num_attention_heads
+        import os  # <- これを追加
+        from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_controlnet import (
+            StableDiffusionControlNetPipeline,
+        )
 
-        controlnet = cls(**config)
-
-        if load_weights_from_transformer:
-            controlnet.pos_embed.load_state_dict(transformer.pos_embed.state_dict())
-            controlnet.time_text_embed.load_state_dict(transformer.time_text_embed.state_dict())
-            controlnet.context_embedder.load_state_dict(transformer.context_embedder.state_dict())
-            controlnet.x_embedder.load_state_dict(transformer.x_embedder.state_dict())
-            controlnet.transformer_blocks.load_state_dict(transformer.transformer_blocks.state_dict(), strict=False)
-            controlnet.single_transformer_blocks.load_state_dict(
-                transformer.single_transformer_blocks.state_dict(), strict=False
-            )
-
-            controlnet.controlnet_x_embedder = zero_module(controlnet.controlnet_x_embedder)
-
-        return controlnet
+        return StableDiffusionControlNetPipeline.from_pretrained(
+            pretrained_model_name_or_path, **kwargs
+        ).controlnet
 
     def forward(
         self,
+        sample: torch.FloatTensor,
+        timestep: Union[torch.Tensor, float, int],
         hidden_states: torch.Tensor,
         controlnet_cond: torch.Tensor,
         controlnet_mode: torch.Tensor = None,
         conditioning_scale: float = 1.0,
         encoder_hidden_states: torch.Tensor = None,
         pooled_projections: torch.Tensor = None,
-        timestep: torch.LongTensor = None,
         img_ids: torch.Tensor = None,
         txt_ids: torch.Tensor = None,
         guidance: torch.Tensor = None,
@@ -222,9 +210,13 @@ class FluxControlNetModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         return_dict: bool = True,
     ) -> Union[torch.FloatTensor, Transformer2DModelOutput]:
         """
-        The [`FluxTransformer2DModel`] forward method.
+        The [`FluxControlNetModel`] forward method.
 
         Args:
+            sample (`torch.FloatTensor`):
+                Input sample.
+            timestep: (`torch.Tensor`, `float`, or `int`):
+                Timestep to use for the denoising process.
             hidden_states (`torch.FloatTensor` of shape `(batch size, channel, height, width)`):
                 Input `hidden_states`.
             controlnet_cond (`torch.Tensor`):
@@ -237,10 +229,12 @@ class FluxControlNetModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
                 Conditional embeddings (embeddings computed from the input conditions such as prompts) to use.
             pooled_projections (`torch.FloatTensor` of shape `(batch_size, projection_dim)`): Embeddings projected
                 from the embeddings of input conditions.
-            timestep ( `torch.LongTensor`):
-                Used to indicate denoising step.
-            block_controlnet_hidden_states: (`list` of `torch.Tensor`):
-                A list of tensors that if specified are added to the residuals of transformer blocks.
+            img_ids: (`torch.Tensor`):
+                Image ids to use for the denoising process.
+            txt_ids: (`torch.Tensor`):
+                Text ids to use for the denoising process.
+            guidance: (`torch.Tensor`):
+                Guidance to use for the denoising process.
             joint_attention_kwargs (`dict`, *optional*):
                 A kwargs dictionary that if specified is passed along to the `AttentionProcessor` as defined under
                 `self.processor` in
