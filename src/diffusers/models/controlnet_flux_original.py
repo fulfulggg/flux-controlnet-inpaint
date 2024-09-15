@@ -208,14 +208,13 @@ class FluxControlNetModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
 
     def forward(
         self,
-        sample: torch.FloatTensor,
-        timestep: Union[torch.Tensor, float, int],
         hidden_states: torch.Tensor,
         controlnet_cond: torch.Tensor,
         controlnet_mode: torch.Tensor = None,
         conditioning_scale: float = 1.0,
         encoder_hidden_states: torch.Tensor = None,
         pooled_projections: torch.Tensor = None,
+        timestep: torch.LongTensor = None,
         img_ids: torch.Tensor = None,
         txt_ids: torch.Tensor = None,
         guidance: torch.Tensor = None,
@@ -223,13 +222,9 @@ class FluxControlNetModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         return_dict: bool = True,
     ) -> Union[torch.FloatTensor, Transformer2DModelOutput]:
         """
-        The [`FluxControlNetModel`] forward method.
+        The [`FluxTransformer2DModel`] forward method.
 
         Args:
-            sample (`torch.FloatTensor`):
-                Input sample.
-            timestep: (`torch.Tensor`, `float`, or `int`):
-                Timestep to use for the denoising process.
             hidden_states (`torch.FloatTensor` of shape `(batch size, channel, height, width)`):
                 Input `hidden_states`.
             controlnet_cond (`torch.Tensor`):
@@ -242,12 +237,10 @@ class FluxControlNetModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
                 Conditional embeddings (embeddings computed from the input conditions such as prompts) to use.
             pooled_projections (`torch.FloatTensor` of shape `(batch_size, projection_dim)`): Embeddings projected
                 from the embeddings of input conditions.
-            img_ids: (`torch.Tensor`):
-                Image ids to use for the denoising process.
-            txt_ids: (`torch.Tensor`):
-                Text ids to use for the denoising process.
-            guidance: (`torch.Tensor`):
-                Guidance to use for the denoising process.
+            timestep ( `torch.LongTensor`):
+                Used to indicate denoising step.
+            block_controlnet_hidden_states: (`list` of `torch.Tensor`):
+                A list of tensors that if specified are added to the residuals of transformer blocks.
             joint_attention_kwargs (`dict`, *optional*):
                 A kwargs dictionary that if specified is passed along to the `AttentionProcessor` as defined under
                 `self.processor` in
