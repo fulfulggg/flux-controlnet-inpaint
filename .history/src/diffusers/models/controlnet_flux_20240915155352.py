@@ -26,7 +26,6 @@ from ..models.modeling_utils import ModelMixin
 from ..utils import USE_PEFT_BACKEND, is_torch_version, logging, scale_lora_layers, unscale_lora_layers
 from .controlnet import BaseOutput, zero_module
 from .embeddings import CombinedTimestepGuidanceTextProjEmbeddings, CombinedTimestepTextProjEmbeddings, FluxPosEmbed
-from ..pipelines.stable_diffusion.pipeline_stable_diffusion_controlnet import StableDiffusionControlNetPipeline # <- これを追加
 import os  # <- これをここに移動
 
 from .modeling_outputs import Transformer2DModelOutput
