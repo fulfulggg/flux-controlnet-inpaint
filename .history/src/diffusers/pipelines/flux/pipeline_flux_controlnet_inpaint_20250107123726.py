@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import inspect
-import os # <- これを追加
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -963,9 +962,8 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
                 )
 
                 noise_pred = self.transformer(
-                    sample=latents,  # <- sample引数を追加
-                    timestep=timestep / 1000,
                     hidden_states=latents,
+                    timestep=timestep / 1000,
                     guidance=guidance,
                     pooled_projections=pooled_prompt_embeds,
                     encoder_hidden_states=prompt_embeds,
