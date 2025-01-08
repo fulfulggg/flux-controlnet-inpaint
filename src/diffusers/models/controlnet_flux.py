@@ -1,11 +1,10 @@
-# -------------------------------------------------------------------------------------
-# controlnet_flux.py (修正版2)
-#  - FluxMultiControlNetModel維持
-#  - residualにマスク適用する仕組み(例)を追加しつつ大幅削除はしない
-# -------------------------------------------------------------------------------------
-# Copyright 2024 ...
-# Licensed under the Apache License, Version 2.0 ...
-
+# --------------------------------------------------------------------------------------
+# controlnet_flux.py (修正版最終版)
+# --------------------------------------------------------------------------------------
+#  - FluxMultiControlNetModel を保持
+#  - docstring はオリジナル維持
+#  - residual に mask_tensor を掛けたい場合はオプションにしてある
+# --------------------------------------------------------------------------------------
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -22,8 +21,7 @@ from .embeddings import CombinedTimestepGuidanceTextProjEmbeddings, CombinedTime
 from .modeling_outputs import Transformer2DModelOutput
 from .transformers.transformer_flux import FluxSingleTransformerBlock, FluxTransformerBlock
 
-
-logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+logger = logging.get_logger(__name__)
 
 
 @dataclass
@@ -59,7 +57,7 @@ class FluxControlNetModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
             CombinedTimestepGuidanceTextProjEmbeddings if guidance_embeds else CombinedTimestepTextProjEmbeddings
         )
         self.time_text_embed = text_time_guidance_cls(
-            embedding_dim=self.inner_dim, 
+            embedding_dim=self.inner_dim,
             pooled_projection_dim=pooled_projection_dim
         )
 
@@ -88,7 +86,7 @@ class FluxControlNetModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
             ]
         )
 
-        # controlnet_blocks
+        # controlnet blocks
         self.controlnet_blocks = nn.ModuleList([])
         for _ in range(len(self.transformer_blocks)):
             self.controlnet_blocks.append(zero_module(nn.Linear(self.inner_dim, self.inner_dim)))
@@ -108,18 +106,14 @@ class FluxControlNetModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
     @property
     def attn_processors(self):
         r"""
-        Returns:
-            `dict` of attention processors
+        ...
         """
         processors = {}
-
         def fn_recursive_add_processors(name: str, module: torch.nn.Module, processors: Dict[str, AttentionProcessor]):
             if hasattr(module, "get_processor"):
                 processors[f"{name}.processor"] = module.get_processor()
-
             for sub_name, child in module.named_children():
                 fn_recursive_add_processors(f"{name}.{sub_name}", child, processors)
-
             return processors
 
         for name, module in self.named_children():
@@ -131,14 +125,12 @@ class FluxControlNetModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         count = len(self.attn_processors.keys())
         if isinstance(processor, dict) and len(processor) != count:
             raise ValueError("Mismatch in processor dict length")
-
         def fn_recursive_attn_processor(name: str, module: torch.nn.Module, processor):
             if hasattr(module, "set_processor"):
                 if not isinstance(processor, dict):
                     module.set_processor(processor)
                 else:
                     module.set_processor(processor.pop(f"{name}.processor"))
-
             for sub_name, child in module.named_children():
                 fn_recursive_attn_processor(f"{name}.{sub_name}", child, processor)
 
@@ -172,7 +164,9 @@ class FluxControlNetModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
             controlnet.time_text_embed.load_state_dict(transformer.time_text_embed.state_dict())
             controlnet.context_embedder.load_state_dict(transformer.context_embedder.state_dict())
             controlnet.x_embedder.load_state_dict(transformer.x_embedder.state_dict())
-            controlnet.transformer_blocks.load_state_dict(transformer.transformer_blocks.state_dict(), strict=False)
+            controlnet.transformer_blocks.load_state_dict(
+                transformer.transformer_blocks.state_dict(), strict=False
+            )
             controlnet.single_transformer_blocks.load_state_dict(
                 transformer.single_transformer_blocks.state_dict(), strict=False
             )
@@ -195,12 +189,11 @@ class FluxControlNetModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         guidance: torch.Tensor = None,
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
-        # (追加) mask_tensor: Optional[torch.Tensor] = None,
-        mask_tensor: Optional[torch.Tensor] = None,  # (修正) 
+        # 追加: mask_tensor で residualをマスク
+        mask_tensor: Optional[torch.Tensor] = None,
     ) -> Union[torch.FloatTensor, Transformer2DModelOutput]:
         """
-        The [`FluxTransformer2DModel`] forward method.
-        (オリジナルに加え、mask_tensorでマスク外を residual=0 にする対応)
+        (オリジナルdocstring)
         """
         if joint_attention_kwargs is not None:
             joint_attention_kwargs = joint_attention_kwargs.copy()
@@ -211,7 +204,6 @@ class FluxControlNetModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         if USE_PEFT_BACKEND:
             scale_lora_layers(self, lora_scale)
 
-        # add
         hidden_states = self.x_embedder(hidden_states)
         hidden_states = hidden_states + self.controlnet_x_embedder(controlnet_cond)
 
@@ -234,7 +226,7 @@ class FluxControlNetModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
             encoder_hidden_states = torch.cat([controlnet_mode_emb, encoder_hidden_states], dim=1)
             txt_ids = torch.cat([txt_ids[:1], txt_ids], dim=0)
 
-        # (warning for 3d txt_ids etc.)
+        # (log warnings for 3d txt_ids/img_ids)...
 
         ids = torch.cat((txt_ids, img_ids), dim=0)
         image_rotary_emb = self.pos_embed(ids)
@@ -242,6 +234,7 @@ class FluxControlNetModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
         block_samples = ()
         hidden_ = hidden_states
         enc_ = encoder_hidden_states
+
         for index_block, block in enumerate(self.transformer_blocks):
             enc_, hidden_ = block(
                 hidden_states=hidden_,
@@ -262,33 +255,31 @@ class FluxControlNetModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
             )
             single_block_samples = single_block_samples + (hidden_[:, enc_.shape[1]:],)
 
-        # control blocks
         controlnet_block_samples = ()
-        for bs_, cb_ in zip(block_samples, self.controlnet_blocks):
-            out_ = cb_(bs_)
+        for bs_, cblock_ in zip(block_samples, self.controlnet_blocks):
+            out_ = cblock_(bs_)
             controlnet_block_samples = controlnet_block_samples + (out_,)
 
         controlnet_single_block_samples = ()
-        for sbs_, cbs_ in zip(single_block_samples, self.controlnet_single_blocks):
-            out_2 = cbs_(sbs_)
-            controlnet_single_block_samples = controlnet_single_block_samples + (out_2,)
+        for sbs_, cblock2_ in zip(single_block_samples, self.controlnet_single_blocks):
+            out2_ = cblock2_(sbs_)
+            controlnet_single_block_samples = controlnet_single_block_samples + (out2_,)
 
-        # (修正) mask_tensor があれば residual を mask内のみにする
+        # ここで mask_tensor があれば residualをマスク内だけにする
         if mask_tensor is not None:
-            # shape check: block_samples[i].(batch, seq_len, dim)
-            #  mask_tensor ~ (batch, seq_len, 1)
-            new_blocks = []
-            for bb in controlnet_block_samples:
-                new_blocks.append(bb * mask_tensor)
-            controlnet_block_samples = tuple(new_blocks)
+            new_block_list = []
+            for sample_ in controlnet_block_samples:
+                new_block_list.append(sample_ * mask_tensor)
+            controlnet_block_samples = tuple(new_block_list)
 
-            new_single = []
-            for sb in controlnet_single_block_samples:
-                new_single.append(sb * mask_tensor)
-            controlnet_single_block_samples = tuple(new_single)
+            new_single_list = []
+            for s_ in controlnet_single_block_samples:
+                new_single_list.append(s_ * mask_tensor)
+            controlnet_single_block_samples = tuple(new_single_list)
 
-        controlnet_block_samples = [bbb * conditioning_scale for bbb in controlnet_block_samples]
-        controlnet_single_block_samples = [sss * conditioning_scale for sss in controlnet_single_block_samples]
+        # scale
+        controlnet_block_samples = [x_ * conditioning_scale for x_ in controlnet_block_samples]
+        controlnet_single_block_samples = [x_ * conditioning_scale for x_ in controlnet_single_block_samples]
 
         if USE_PEFT_BACKEND:
             unscale_lora_layers(self, lora_scale)
@@ -304,8 +295,7 @@ class FluxControlNetModel(ModelMixin, ConfigMixin, PeftAdapterMixin):
 
 class FluxMultiControlNetModel(ModelMixin):
     r"""
-    `FluxMultiControlNetModel` wrapper class for Multi-FluxControlNetModel
-    (オリジナルの docstring)
+    (オリジナルdocstring)
     """
     def __init__(self, controlnets):
         super().__init__()
@@ -328,7 +318,6 @@ class FluxMultiControlNetModel(ModelMixin):
         # (追加) mask_tensor
         mask_tensor: Optional[torch.Tensor] = None,
     ):
-        # (オリジナルでは mask_tensor なし→最小限追加)
         if len(self.nets) == 1 and self.nets[0].union:
             controlnet = self.nets[0]
 
@@ -346,19 +335,19 @@ class FluxMultiControlNetModel(ModelMixin):
                     img_ids=img_ids,
                     joint_attention_kwargs=joint_attention_kwargs,
                     return_dict=False,
-                    mask_tensor=mask_tensor, # pass it
+                    mask_tensor=mask_tensor,
                 )
-
                 if i == 0:
                     control_block_samples = block_samples
                     control_single_block_samples = single_block_samples
                 else:
                     control_block_samples = [
-                        cbs + bs for cbs, bs in zip(control_block_samples, block_samples)
+                        cbs + bs_ for cbs, bs_ in zip(control_block_samples, block_samples)
                     ]
                     control_single_block_samples = [
-                        csbs + sbs for csbs, sbs in zip(control_single_block_samples, single_block_samples)
+                        csbs + sbs_ for csbs, sbs_ in zip(control_single_block_samples, single_block_samples)
                     ]
+
         else:
             for i, (image, mode, scale, cn) in enumerate(zip(controlnet_cond, controlnet_mode, conditioning_scale, self.nets)):
                 block_samples, single_block_samples = cn(
@@ -381,10 +370,10 @@ class FluxMultiControlNetModel(ModelMixin):
                     control_single_block_samples = single_block_samples
                 else:
                     control_block_samples = [
-                        cb + bs for cb, bs in zip(control_block_samples, block_samples)
+                        a + b for a, b in zip(control_block_samples, block_samples)
                     ]
                     control_single_block_samples = [
-                        cs + sbs for cs, sbs in zip(control_single_block_samples, single_block_samples)
+                        a + b for a, b in zip(control_single_block_samples, single_block_samples)
                     ]
 
         if not return_dict:
