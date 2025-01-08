@@ -1,14 +1,8 @@
-# --------------------------------------------------------------------------------------
-# pipeline_flux_controlnet_inpaint.py (修正版2)
-#  - Inpaint + ControlNet がより強く効くように、
-#    - mask外黒塗りヘルパー
-#  - T5で512トークン対応 (max_sequence_length=512)
-#  - 既存の行構造を大きく崩さないように注意
-# --------------------------------------------------------------------------------------
-# Copyright 2024 Black Forest Labs, The HuggingFace Team and The InstantX Team. 
-# All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 ...
+# ----------------------------------------------------------------------------------------
+# pipeline_flux_controlnet_inpaint.py (修正版最終版)
+# ----------------------------------------------------------------------------------------
+# (以下、行構造はオリジナルと同じ順序でなるべく保ちながら修正)
+# Copyright 2024 ...
 # ...
 import inspect
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -49,16 +43,16 @@ else:
     XLA_AVAILABLE = False
 
 
-logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+logger = logging.get_logger(__name__)
+
 
 EXAMPLE_DOC_STRING = """
     Examples:
         ...
 """
 
-# ----------------------------------------------------------------------------
+
 # Copied from diffusers.pipelines.flux.pipeline_flux.calculate_shift
-# ----------------------------------------------------------------------------
 def calculate_shift(
     image_seq_len,
     base_seq_len: int = 256,
@@ -71,9 +65,8 @@ def calculate_shift(
     mu = image_seq_len * m + b
     return mu
 
-# ----------------------------------------------------------------------------
+
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
-# ----------------------------------------------------------------------------
 def retrieve_timesteps(
     scheduler,
     num_inference_steps: Optional[int] = None,
@@ -82,26 +75,19 @@ def retrieve_timesteps(
     sigmas: Optional[List[float]] = None,
     **kwargs,
 ):
-    """
-    ...
-    """
     if timesteps is not None and sigmas is not None:
         raise ValueError("Only one of `timesteps` or `sigmas` can be passed.")
     if timesteps is not None:
         accepts_timesteps = "timesteps" in set(inspect.signature(scheduler.set_timesteps).parameters.keys())
         if not accepts_timesteps:
-            raise ValueError(
-                f"The current scheduler class {scheduler.__class__} does not support custom timesteps."
-            )
+            raise ValueError(f"The current scheduler {scheduler.__class__} does not support custom timesteps.")
         scheduler.set_timesteps(timesteps=timesteps, device=device, **kwargs)
         timesteps = scheduler.timesteps
         num_inference_steps = len(timesteps)
     elif sigmas is not None:
         accept_sigmas = "sigmas" in set(inspect.signature(scheduler.set_timesteps).parameters.keys())
         if not accept_sigmas:
-            raise ValueError(
-                f"The current scheduler class {scheduler.__class__} does not support custom sigmas schedules."
-            )
+            raise ValueError(f"The current scheduler {scheduler.__class__} does not support custom sigmas.")
         scheduler.set_timesteps(sigmas=sigmas, device=device, **kwargs)
         timesteps = scheduler.timesteps
         num_inference_steps = len(timesteps)
@@ -113,19 +99,14 @@ def retrieve_timesteps(
 
 class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFileMixin):
     r"""
-    The Flux pipeline for text-to-image generation (Inpaint + ControlNet).
-    Reference: https://blackforestlabs.ai/announcing-black-forest-labs/
-
-    (オリジナルの docstring はそのまま)
+    The Flux pipeline for text-to-image generation. (Inpaint + ControlNet)
+    ...
     """
 
     model_cpu_offload_seq = "text_encoder->text_encoder_2->transformer->vae"
     _optional_components = []
     _callback_tensor_inputs = ["latents", "prompt_embeds"]
 
-    # -------------------------------------------------------------------------
-    # __init__ 
-    # -------------------------------------------------------------------------
     def __init__(
         self,
         scheduler: FlowMatchEulerDiscreteScheduler,
@@ -165,19 +146,19 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
             do_binarize=True,
             do_convert_grayscale=True,
         )
-        # (修正) CLIP tokenizerのmodel_max_length は ~77、 
-        #       ただし T5で512トークン対応したいので デフォルトを77→512にする
-        self.tokenizer_max_length = 512  # <-- (修正) 
+        # (修正) CLIP は 77までだが T5用に512をデフォルトに
+        # オリジナルでは tokenizer.model_max_length (~77) を入れていたが、ここを512に
+        self.tokenizer_max_length = 512  
         self.default_sample_size = 64
 
-    # -------------------------------------------------------------------------
-    # _get_t5_prompt_embeds (修正: max_sequence_length=512 デフォルト)
-    # -------------------------------------------------------------------------
+    # -------------------------------------------------------------
+    # T5 で 512トークンを扱う
+    # -------------------------------------------------------------
     def _get_t5_prompt_embeds(
         self,
         prompt: Union[str, List[str]] = None,
         num_images_per_prompt: int = 1,
-        max_sequence_length: int = 512,  # (修正) デフォルト512
+        max_sequence_length: int = 512,  # enforce 512
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ):
@@ -190,7 +171,7 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
         text_inputs = self.tokenizer_2(
             prompt,
             padding="max_length",
-            max_length=max_sequence_length,  # (修正) enforce 512
+            max_length=max_sequence_length,
             truncation=True,
             return_length=False,
             return_overflowing_tokens=False,
@@ -204,11 +185,14 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
                 untruncated_ids[:, self.tokenizer_max_length - 1 : -1]
             )
             logger.warning(
-                "The following part of your input was truncated because `max_sequence_length` is set to 512 tokens:"
-                f" {removed_text}"
+                "The following part of your input was truncated because max_sequence_length=512. "
+                f"Truncated portion: {removed_text}"
             )
 
-        prompt_embeds = self.text_encoder_2(text_input_ids.to(device), output_hidden_states=False)[0]
+        prompt_embeds = self.text_encoder_2(
+            text_input_ids.to(device), 
+            output_hidden_states=False
+        )[0]
 
         dtype = self.text_encoder_2.dtype
         prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
@@ -220,32 +204,6 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
 
         return prompt_embeds
 
-    # -------------------------------------------------------------------------
-    # 追加: マスク外を黒塗りするヘルパー (Cannyなど)
-    # -------------------------------------------------------------------------
-    def _apply_mask_to_control_image(self, control_image, mask_image):
-        """
-        マスク外を黒塗り: mask_image=白(変更),黒(保持)
-        """
-        import PIL
-        from PIL import Image
-        control_image = control_image.convert("RGB")
-        mask_image = mask_image.convert("L")
-
-        if control_image.size != mask_image.size:
-            control_image = control_image.resize(mask_image.size, resample=PIL.Image.LANCZOS)
-
-        c_np = np.array(control_image, dtype=np.uint8)
-        m_np = np.array(mask_image, dtype=np.uint8)
-
-        out_np = np.zeros_like(c_np)
-        mask_bool = (m_np > 128)
-        out_np[mask_bool] = c_np[mask_bool]
-
-        return Image.fromarray(out_np, mode="RGB")
-
-    # (以下の _get_clip_prompt_embeds, encode_prompt, check_inputs はオリジナルのまま or 最小修正)
-    # -------------------------------------------------------------------------
     def _get_clip_prompt_embeds(
         self,
         prompt: Union[str, List[str]],
@@ -274,18 +232,18 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
                 untruncated_ids[:, self.tokenizer.model_max_length - 1 : -1]
             )
             logger.warning(
-                "The following part of your input was truncated because CLIP can only handle up to "
-                f"{self.tokenizer.model_max_length} tokens: {removed_text}"
+                f"The following part of your input was truncated because CLIP can only handle {self.tokenizer.model_max_length} tokens:"
+                f" {removed_text}"
             )
-        prompt_embeds = self.text_encoder(text_input_ids.to(device), output_hidden_states=False)
-
-        # Use pooled output of CLIPTextModel
+        prompt_embeds = self.text_encoder(
+            text_input_ids.to(device),
+            output_hidden_states=False
+        )
         prompt_embeds = prompt_embeds.pooler_output
         prompt_embeds = prompt_embeds.to(dtype=self.text_encoder.dtype, device=device)
 
         prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
         prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, -1)
-
         return prompt_embeds
 
     def encode_prompt(
@@ -296,13 +254,14 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
         num_images_per_prompt: int = 1,
         prompt_embeds: Optional[torch.FloatTensor] = None,
         pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
-        max_sequence_length: int = 512,  # (修正) default=512
+        max_sequence_length: int = 512,
         lora_scale: Optional[float] = None,
     ):
         device = device or self._execution_device
 
         if lora_scale is not None and isinstance(self, FluxLoraLoaderMixin):
             self._lora_scale = lora_scale
+
             if self.text_encoder is not None and USE_PEFT_BACKEND:
                 scale_lora_layers(self.text_encoder, lora_scale)
             if self.text_encoder_2 is not None and USE_PEFT_BACKEND:
@@ -314,7 +273,7 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
             prompt_2 = prompt_2 or prompt
             prompt_2 = [prompt_2] if isinstance(prompt_2, str) else prompt_2
 
-            # CLIP
+            # CLIP (max 77 tokens)
             pooled_prompt_embeds = self._get_clip_prompt_embeds(
                 prompt=prompt,
                 device=device,
@@ -324,7 +283,7 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
             prompt_embeds = self._get_t5_prompt_embeds(
                 prompt=prompt_2,
                 num_images_per_prompt=num_images_per_prompt,
-                max_sequence_length=512,
+                max_sequence_length=max_sequence_length,
                 device=device,
             )
 
@@ -354,17 +313,15 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
         max_sequence_length=None,
     ):
         if strength < 0 or strength > 1:
-            raise ValueError(f"The value of strength should in [0.0,1.0], got {strength}")
+            raise ValueError(f"The value of strength should be in [0,1], got {strength}")
 
         if height % 8 != 0 or width % 8 != 0:
-            raise ValueError(f"`height` and `width` must be divisible by 8 but got {height}x{width}.")
+            raise ValueError(f"`height` and `width` have to be divisible by 8, but got {height}x{width}.")
 
         if callback_on_step_end_tensor_inputs is not None and not all(
             k in self._callback_tensor_inputs for k in callback_on_step_end_tensor_inputs
         ):
-            raise ValueError(
-                f"`callback_on_step_end_tensor_inputs` invalid: {callback_on_step_end_tensor_inputs}"
-            )
+            raise ValueError("callback_on_step_end_tensor_inputs invalid")
 
         if prompt is not None and prompt_embeds is not None:
             raise ValueError("Cannot forward both `prompt` and `prompt_embeds`.")
@@ -373,12 +330,12 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
         elif prompt is None and prompt_embeds is None:
             raise ValueError("Provide either `prompt` or `prompt_embeds`.")
         elif prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
-            raise ValueError(f"`prompt` must be str or list, got {type(prompt)}")
+            raise ValueError(f"`prompt` must be str or list, but got {type(prompt)}.")
         elif prompt_2 is not None and (not isinstance(prompt_2, str) and not isinstance(prompt_2, list)):
-            raise ValueError(f"`prompt_2` must be str or list, got {type(prompt_2)}")
+            raise ValueError(f"`prompt_2` must be str or list, but got {type(prompt_2)}.")
 
         if prompt_embeds is not None and pooled_prompt_embeds is None:
-            raise ValueError("If `prompt_embeds` are provided, `pooled_prompt_embeds` must be passed as well.")
+            raise ValueError("If `prompt_embeds` are provided, `pooled_prompt_embeds` also have to be passed.")
 
         if max_sequence_length is not None and max_sequence_length > 512:
             raise ValueError(f"`max_sequence_length` cannot be >512, got {max_sequence_length}")
@@ -386,11 +343,12 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
     @staticmethod
     def _prepare_latent_image_ids(batch_size, height, width, device, dtype):
         latent_image_ids = torch.zeros(height // 2, width // 2, 3)
-        latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height // 2)[:, None]
-        latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width // 2)[None, :]
+        latent_image_ids[..., 1] += torch.arange(height // 2)[:, None]
+        latent_image_ids[..., 2] += torch.arange(width // 2)[None, :]
 
-        lh, lw, lc = latent_image_ids.shape
-        latent_image_ids = latent_image_ids.reshape(lh * lw, lc)
+        h, w, c = latent_image_ids.shape
+        latent_image_ids = latent_image_ids.view(h * w, c)
+
         return latent_image_ids.to(device=device, dtype=dtype)
 
     @staticmethod
@@ -410,7 +368,6 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
         latents = latents.view(batch_size, height_, width_, channels // 4, 2, 2)
         latents = latents.permute(0, 3, 1, 4, 2, 5)
         latents = latents.reshape(batch_size, channels // (2 * 2), height_ * 2, width_ * 2)
-
         return latents
 
     def prepare_latents(
@@ -427,10 +384,13 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
         timestep=None,
         is_strength_max=None,
     ):
+        # ここはオリジナル通りに保持
         if isinstance(generator, list) and len(generator) != batch_size:
-            raise ValueError("Generators list mismatch")
+            raise ValueError("Length of generator list mismatch.")
 
         if (image is None or timestep is None) and not is_strength_max:
+            # ここで "Need image or noise_timestep for latents init" を発する
+            # オリジナル行
             raise ValueError("Need image or noise_timestep for latents init")
 
         height_ = 2 * (int(height) // self.vae_scale_factor)
@@ -453,7 +413,7 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
         latents_ = self._pack_latents(latents_, batch_size, num_channels_latents, height_, width_)
         return latents_, noise, image_latents, latent_image_ids
 
-
+    # Copied from diffusers.pipelines.controlnet_sd3....
     def prepare_image(
         self,
         image,
@@ -472,7 +432,6 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
             image = self.image_processor.preprocess(image, height=height, width=width)
 
         image_batch_size = image.shape[0]
-
         if image_batch_size == 1:
             repeat_by = batch_size
         else:
@@ -502,9 +461,6 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
     def interrupt(self):
         return self._interrupt
 
-    # --------------------------------------------------------------------------
-    # (ここより下はオリジナルの __call__ に最小限の追加を行う)
-    # --------------------------------------------------------------------------
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
@@ -532,10 +488,11 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
-        max_sequence_length: int = 512,  # (修正) 
+        max_sequence_length: int = 512,
     ):
-        # (オリジナルの処理は基本そのまま)
-
+        r"""
+        ...(オリジナルdocstring省略)...
+        """
         height = height or self.default_sample_size * self.vae_scale_factor
         width = width or self.default_sample_size * self.vae_scale_factor
 
@@ -570,35 +527,22 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
         dtype = self.transformer.dtype
 
         lora_scale = (
-            self.joint_attention_kwargs.get("scale", None) if self.joint_attention_kwargs is not None else None
+            self._joint_attention_kwargs.get("scale", None) if self._joint_attention_kwargs is not None else None
         )
-        (
-            prompt_embeds,
-            pooled_prompt_embeds,
-            text_ids,
-        ) = self.encode_prompt(
+        (prompt_embeds, pooled_prompt_embeds, text_ids) = self.encode_prompt(
             prompt=prompt,
             prompt_2=prompt_2,
             prompt_embeds=prompt_embeds,
             pooled_prompt_embeds=pooled_prompt_embeds,
             device=device,
             num_images_per_prompt=num_images_per_prompt,
-            max_sequence_length=max_sequence_length,  # enforce 512 for T5
+            max_sequence_length=max_sequence_length,
             lora_scale=lora_scale,
         )
 
-        # 3. Prepare control image
         num_channels_latents = self.transformer.config.in_channels // 4
 
-        # (修正) mask_imageがあれば、control_imageを黒塗り (Cannyはマスク領域のみ効果)
-        if (mask_image is not None) and (control_image is not None) and isinstance(self.controlnet, FluxControlNetModel):
-            from PIL import Image
-            if not isinstance(control_image, Image.Image):
-                # もしTorch Tensorの場合などは変換要
-                pass
-            # mask外を黒塗り
-            control_image = self._apply_mask_to_control_image(control_image, mask_image)
-
+        # 3. Prepare control image
         if isinstance(self.controlnet, FluxControlNetModel):
             control_image = self.prepare_image(
                 image=control_image,
@@ -610,8 +554,10 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
                 dtype=dtype,
             )
             height, width = control_image.shape[-2:]
+
             control_image = self.vae.encode(control_image).latent_dist.sample()
             control_image = (control_image - self.vae.config.shift_factor) * self.vae.config.scaling_factor
+
             (h_c, w_c) = control_image.shape[2:]
             control_image = self._pack_latents(
                 control_image,
@@ -620,18 +566,17 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
                 h_c,
                 w_c,
             )
-
             if control_mode is not None:
                 control_mode = torch.tensor(control_mode).to(device, dtype=torch.long)
                 control_mode = control_mode.reshape([-1, 1])
 
         elif isinstance(self.controlnet, FluxMultiControlNetModel):
-            # (オリジナルの multi-control 処理)
+            # ...
             pass
 
         # 4. Prepare latents
         init_image = self.image_processor.preprocess(image, height=height, width=width)
-        latents, noise, image_latents, latent_image_ids = self.prepare_latents(
+        latents_, noise_, image_latents_, latent_image_ids_ = self.prepare_latents(
             batch_size * num_images_per_prompt,
             num_channels_latents,
             height,
@@ -645,35 +590,35 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
             is_strength_max,
         )
 
-        # 5. Prepare timesteps
-        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
-        image_seq_len = (int(height) // self.vae_scale_factor) * (int(width) // self.vae_scale_factor)
-        mu = calculate_shift(
+        # 5. prepare timesteps
+        sigmas_ = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
+        image_seq_len = (height // self.vae_scale_factor) * (width // self.vae_scale_factor)
+        mu_ = calculate_shift(
             image_seq_len,
             self.scheduler.config.base_image_seq_len,
             self.scheduler.config.max_image_seq_len,
             self.scheduler.config.base_shift,
             self.scheduler.config.max_shift,
         )
-        timesteps, num_inference_steps = retrieve_timesteps(
+        timesteps_, num_inference_steps_ = retrieve_timesteps(
             self.scheduler,
             num_inference_steps,
             device,
             timesteps,
-            sigmas,
-            mu=mu,
+            sigmas_,
+            mu=mu_,
         )
-        timesteps, num_inference_steps = self.get_timesteps(timesteps, num_inference_steps, strength, device)
-        if num_inference_steps < 1:
-            raise ValueError("Invalid pipeline steps after strength adjustment.")
+        timesteps_, num_inference_steps_ = self.get_timesteps(timesteps_, num_inference_steps_, strength, device)
+        if num_inference_steps_ < 1:
+            raise ValueError("Invalid steps after strength adjustment")
 
-        # 6. Prepare mask latents (Inpaint)
-        mask_condition = self.mask_processor.preprocess(
-            mask_image, height=height, width=width
-        )
-        masked_image_ = init_image * (mask_condition < 0.5)
-        mask_, masked_image_latents_ = self.prepare_mask_latents(
-            mask_condition,
+        latent_timestep_ = timesteps_[:1].repeat(batch_size * num_images_per_prompt)
+
+        # 6. mask
+        mask_condition_ = self.mask_processor.preprocess(mask_image, height=height, width=width)
+        masked_image_ = init_image * (mask_condition_ < 0.5)
+        (mask_, masked_image_latents_) = self.prepare_mask_latents(
+            mask_condition_,
             masked_image_,
             batch_size,
             num_images_per_prompt,
@@ -687,51 +632,58 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
             masked_image_latents_,
             batch_size,
             num_channels_latents,
-            2 * (int(height) // self.vae_scale_factor),
-            2 * (int(width) // self.vae_scale_factor),
+            2 * (height // self.vae_scale_factor),
+            2 * (width // self.vae_scale_factor),
         )
         mask_ = self._pack_latents(
             mask_.repeat(1, num_channels_latents, 1, 1),
             batch_size,
             num_channels_latents,
-            2 * (int(height) // self.vae_scale_factor),
-            2 * (int(width) // self.vae_scale_factor),
+            2 * (height // self.vae_scale_factor),
+            2 * (width // self.vae_scale_factor),
         )
 
-        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
-        self._num_timesteps = len(timesteps)
+        num_warmup_steps_ = max(len(timesteps_) - num_inference_steps_ * self.scheduler.order, 0)
+        self._num_timesteps = len(timesteps_)
 
         # 7. Denoising loop
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(timesteps):
-                if self.interrupt:
+        latents = latents_
+        noise = noise_
+        image_latents = image_latents_
+        latent_image_ids = latent_image_ids_
+
+        with self.progress_bar(total=num_inference_steps_) as progress_bar:
+            for i, t_ in enumerate(timesteps_):
+                if self._interrupt:
                     continue
-                timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
+                timestep_ = t_.expand(latents.shape[0]).to(latents.dtype)
+
+                guidance = None
                 if self.transformer.config.guidance_embeds:
-                    guidance_ = torch.tensor([guidance_scale], device=device)
-                    guidance = guidance_.expand(latents.shape[0])
-                else:
-                    guidance = None
+                    g_ = torch.tensor([guidance_scale], device=device)
+                    guidance = g_.expand(latents.shape[0])
 
+                # controlnet
                 controlnet_block_samples, controlnet_single_block_samples = self.controlnet(
                     hidden_states=latents,
                     controlnet_cond=control_image,
                     controlnet_mode=control_mode,
                     conditioning_scale=controlnet_conditioning_scale,
-                    timestep=timestep / 1000,
+                    timestep=timestep_ / 1000,
                     guidance=guidance,
                     pooled_projections=pooled_prompt_embeds,
                     encoder_hidden_states=prompt_embeds,
                     txt_ids=text_ids,
                     img_ids=latent_image_ids,
-                    joint_attention_kwargs=self.joint_attention_kwargs,
+                    joint_attention_kwargs=self._joint_attention_kwargs,
                     return_dict=False,
+                    # mask_tensor=mask_,  ← ここでマスクをControlNetに渡すならオプション 
                 )
 
                 noise_pred = self.transformer(
                     hidden_states=latents,
-                    timestep=timestep / 1000,
+                    timestep=timestep_ / 1000,
                     guidance=guidance,
                     pooled_projections=pooled_prompt_embeds,
                     encoder_hidden_states=prompt_embeds,
@@ -739,39 +691,41 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
                     controlnet_single_block_samples=controlnet_single_block_samples,
                     txt_ids=text_ids,
                     img_ids=latent_image_ids,
-                    joint_attention_kwargs=self.joint_attention_kwargs,
+                    joint_attention_kwargs=self._joint_attention_kwargs,
                     return_dict=False,
                 )[0]
 
-                latents_dtype = latents.dtype
-                latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                latents_dtype_ = latents.dtype
+                latents = self.scheduler.step(noise_pred, t_, latents, return_dict=False)[0]
 
-                init_latents_proper = image_latents
-                init_mask = mask_
+                init_latents_proper_ = image_latents
+                init_mask_ = mask_
 
-                if i < len(timesteps) - 1:
-                    noise_timestep = timesteps[i + 1]
-                    init_latents_proper = self.scheduler.scale_noise(
-                        init_latents_proper, torch.tensor([noise_timestep]), noise
+                if i < len(timesteps_) - 1:
+                    noise_timestep_ = timesteps_[i + 1]
+                    init_latents_proper_ = self.scheduler.scale_noise(
+                        init_latents_proper_, 
+                        torch.tensor([noise_timestep_]),
+                        noise
                     )
 
-                # combine
-                latents = (1 - init_mask) * init_latents_proper + init_mask * latents
+                latents = (1 - init_mask_) * init_latents_proper_ + init_mask_ * latents
 
-                if latents.dtype != latents_dtype:
+                if latents.dtype != latents_dtype_:
                     if torch.backends.mps.is_available():
-                        latents = latents.to(latents_dtype)
+                        latents = latents.to(latents_dtype_)
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
                     for k in callback_on_step_end_tensor_inputs:
                         callback_kwargs[k] = locals()[k]
-                    callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
+                    callback_outputs = callback_on_step_end(self, i, t_, callback_kwargs)
+
                     latents = callback_outputs.pop("latents", latents)
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
 
-                if i == len(timesteps) - 1 or (
-                    (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
+                if i == len(timesteps_) - 1 or (
+                    (i + 1) > num_warmup_steps_ and (i + 1) % self.scheduler.order == 0
                 ):
                     progress_bar.update()
 
@@ -780,19 +734,20 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
 
         # 8. decode
         if output_type == "latent":
-            image_ = latents
+            image_out = latents
         else:
             latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
             latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
 
-            image_ = self.vae.decode(latents, return_dict=False)[0]
-            image_ = self.image_processor.postprocess(image_, output_type=output_type)
+            image_out = self.vae.decode(latents, return_dict=False)[0]
+            image_out = self.image_processor.postprocess(image_out, output_type=output_type)
 
         self.maybe_free_model_hooks()
 
         if not return_dict:
-            return (image_,)
-        return FluxPipelineOutput(images=image_)
+            return (image_out,)
+
+        return FluxPipelineOutput(images=image_out)
 
 
     def prepare_mask_latents(
@@ -807,7 +762,7 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
         device,
         generator,
     ):
-        # (オリジナルの prepare_mask_latents そのまま)
+        # (オリジナルのメソッドをそのまま)
         mask = torch.nn.functional.interpolate(
             mask, size=(2 * height // self.vae_scale_factor, 2 * width // self.vae_scale_factor)
         )
@@ -826,12 +781,11 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
 
         if mask.shape[0] < batch_size_:
             if not batch_size_ % mask.shape[0] == 0:
-                raise ValueError("Masks batch mismatch.")
+                raise ValueError("Mismatched mask batch size.")
             mask = mask.repeat(batch_size_ // mask.shape[0], 1, 1, 1)
-
         if masked_image_latents.shape[0] < batch_size_:
             if not batch_size_ % masked_image_latents.shape[0] == 0:
-                raise ValueError("masked_image batch mismatch.")
+                raise ValueError("Mismatched masked_image batch size.")
             masked_image_latents = masked_image_latents.repeat(batch_size_ // masked_image_latents.shape[0], 1, 1, 1)
 
         masked_image_latents = masked_image_latents.to(device=device, dtype=dtype)
@@ -839,31 +793,33 @@ class FluxControlNetInpaintPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
 
 
     def get_timesteps(self, timesteps, num_inference_steps, strength, device):
+        # (オリジナル)
         init_timestep = min(num_inference_steps * strength, num_inference_steps)
         t_start = int(max(num_inference_steps - init_timestep, 0))
         timesteps = timesteps[t_start * self.scheduler.order :]
         if hasattr(self.scheduler, "set_begin_index"):
             self.scheduler.set_begin_index(t_start * self.scheduler.order)
+
         return timesteps, num_inference_steps - t_start
 
-
     def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator):
+        # (オリジナル)
         if isinstance(generator, list):
-            image_latents = [
-                retrieve_latents(self.vae.encode(image[i : i + 1]), generator=generator[i])
-                for i in range(image.shape[0])
-            ]
+            image_latents = []
+            for i in range(image.shape[0]):
+                out_ = retrieve_latents(self.vae.encode(image[i : i + 1]), generator=generator[i])
+                image_latents.append(out_)
             image_latents = torch.cat(image_latents, dim=0)
         else:
             image_latents = retrieve_latents(self.vae.encode(image), generator=generator)
 
         image_latents = (image_latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor
-
         return image_latents
 
 def retrieve_latents(
     encoder_output: torch.Tensor, generator: Optional[torch.Generator] = None, sample_mode: str = "sample"
 ):
+    # (オリジナルのまま)
     if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
         return encoder_output.latent_dist.sample(generator)
     elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
